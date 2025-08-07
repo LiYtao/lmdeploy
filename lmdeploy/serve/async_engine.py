@@ -16,7 +16,6 @@ from typing import Any, AsyncIterator, Dict, Iterator, List, Literal, Optional, 
 
 import torch
 import tqdm
-
 from lmdeploy import Tokenizer
 from lmdeploy.archs import get_model_arch
 from lmdeploy.logger import RequestLogger
@@ -513,6 +512,24 @@ class AsyncEngine(LogitsMixin):
                 yield r
 
         return self._infer(requests(), multiplex, pbar)
+
+    async def extra_batch_infer(
+            self,
+            prompts: Union[List[str], str, List[Dict], List[List[Dict]]],
+            gen_config: Optional[Union[GenerationConfig,List[GenerationConfig]]] = None,
+            do_preprocess: bool = True,
+            adapter_name: Optional[str] = None,
+            use_tqdm: bool = False,
+            **kwargs):
+        """Inference a batch of prompts.
+        :return: outputs
+        """
+        return await asyncio.to_thread(self.batch_infer, prompts,
+                                gen_config=gen_config,
+                                do_preprocess=do_preprocess,
+                                adapter_name=adapter_name,
+                                use_tqdm=use_tqdm,
+                                **kwargs)
 
     def batch_infer(self,
                     prompts: Union[List[str], str, List[Dict], List[List[Dict]]],

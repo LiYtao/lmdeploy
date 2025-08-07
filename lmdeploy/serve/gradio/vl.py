@@ -13,6 +13,7 @@ from lmdeploy.model import ChatTemplateConfig
 from lmdeploy.serve.gradio.constants import CSS, THEME, disable_btn, enable_btn
 from lmdeploy.utils import get_logger
 
+
 BATCH_SIZE = 32
 logger = get_logger('lmdeploy')
 

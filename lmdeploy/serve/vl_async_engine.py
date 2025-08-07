@@ -4,7 +4,7 @@ import asyncio
 from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import PIL
-
+import PIL.Image
 from lmdeploy.messages import PytorchEngineConfig, TurbomindEngineConfig, VisionConfig
 from lmdeploy.model import BaseChatTemplate
 from lmdeploy.serve.async_engine import AsyncEngine
@@ -42,9 +42,46 @@ class VLAsyncEngine(AsyncEngine):
             _prompts = cls.prompt_to_messages(prompts)
         elif isinstance(prompts[0], tuple) or isinstance(prompts[0], str):
             _prompts = [cls.prompt_to_messages(x) for x in prompts]
+        elif isinstance(prompts[0], List):
+            _prompts = cls._process_item(prompts)
         else:
             _prompts = prompts
         return _prompts
+
+    @classmethod
+    def _process_item(cls, item):
+        if isinstance(item, list):
+            return [cls._process_item(i) for i in item]
+
+        if isinstance(item, dict):
+            if 'content' in item:
+                if isinstance(item['content'], list):
+                    item['content'] = [
+                        cls._process_message(m) for m in item['content']
+                    ]
+                else:
+                    item['content'] = cls._process_message(item['content'])
+                return item
+
+            return item
+
+    @staticmethod
+    def _process_message(message):
+        if isinstance(message, dict):
+            if message.get('type') == 'image_url' or message.get(
+                    'type') == 'image_data':
+                # Convert image URL to PIL Image
+                image_url = message['image_url']['url'] if message.get(
+                    'type') == 'image_url' else message['image_data']["data"]
+                image = None
+                if isinstance(image_url, PIL.Image.Image):
+                    image = image_url
+                if isinstance(image_url, str):
+                    image = load_image(image_url)
+
+                return {'type': 'image_data', 'image_data': {'data': image}}
+
+        return message
 
     async def _get_prompt_input(self,
                                 messages: Union[str, List[Dict]],
@@ -268,3 +305,10 @@ class VLAsyncEngine(AsyncEngine):
                 messages['content'].append(item)
 
         return [messages]
+
+    async def extra_batch_infer(self,
+                                prompts: Union[List[str], str, List[Dict],
+                                List[List[Dict]]], **kwargs):
+        """Extra Inference a batch of prompts."""
+        prompts = self._convert_prompts(prompts)
+        return asyncio.to_thread(super().batch_infer, prompts, **kwargs)
