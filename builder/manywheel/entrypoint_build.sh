@@ -11,6 +11,8 @@ export NCCL_LIB_DIR=/usr/local/cuda/lib64
 source /opt/conda/bin/activate
 conda activate $PYTHON_VERSION
 
+git config --global --add safe.directory /lmdeploy
+
 cd lmdeploy
 pip install build change-wheel-version
 python -m build --wheel -o /tmpbuild/
