@@ -7,6 +7,10 @@ import sys
 from collections import defaultdict
 from typing import Any, List
 
+from lmdeploy.utils import get_logger
+
+logger = get_logger('lmdeploy')
+
 
 class DefaultsAndTypesHelpFormatter(argparse.HelpFormatter):
     """Formatter to output default value and type in help information."""
@@ -64,10 +68,12 @@ def get_lora_adapters(adapters: List[str]):
     return output
 
 
-def get_chat_template(chat_template: str):
+def get_chat_template(chat_template: str, model_path: str = None):
     """Get chat template config.
 
-    Args     chat_template(str): it could be a builtin chat template name,     or a chat template json file
+    Args:
+        chat_template(str): it could be a builtin chat template name, or a chat template json file
+        model_path(str): the model path, used to check deprecated chat template names
     """
     import os
 
@@ -76,14 +82,34 @@ def get_chat_template(chat_template: str):
         if os.path.isfile(chat_template):
             return ChatTemplateConfig.from_json(chat_template)
         else:
-            from lmdeploy.model import MODELS
+            from lmdeploy.model import DEPRECATED_CHAT_TEMPLATE_NAMES, MODELS, REMOVED_CHAT_TEMPLATE_NAMES
+            if chat_template in REMOVED_CHAT_TEMPLATE_NAMES:
+                raise ValueError(f"The chat template '{chat_template}' has been removed. "
+                                 f'Please refer to the latest chat templates in '
+                                 f'https://lmdeploy.readthedocs.io/en/latest/advance/chat_template.html')
+            if chat_template in DEPRECATED_CHAT_TEMPLATE_NAMES:
+                logger.warning(f"The chat template '{chat_template}' is deprecated and fallback to hf chat template.")
+                chat_template = 'hf'
             assert chat_template in MODELS.module_dict.keys(), \
                 f"chat template '{chat_template}' is not " \
                 f'registered. The builtin chat templates are: ' \
                 f'{MODELS.module_dict.keys()}'
-            return ChatTemplateConfig(model_name=chat_template)
+            return ChatTemplateConfig(model_name=chat_template, model_path=model_path)
     else:
         return None
+
+
+def get_speculative_config(args):
+    """Get speculative config from args."""
+    from lmdeploy.messages import SpeculativeConfig
+    speculative_config = None
+    if args.speculative_algorithm is not None:
+        speculative_config = SpeculativeConfig(
+            method=args.speculative_algorithm,
+            model=args.speculative_draft_model,
+            num_speculative_tokens=args.speculative_num_draft_tokens,
+        )
+    return speculative_config
 
 
 class ArgumentHelper:
@@ -126,7 +152,7 @@ class ArgumentHelper:
         return parser.add_argument('--model-format',
                                    type=str,
                                    default=default,
-                                   choices=['hf', 'awq', 'gptq', 'fp8'],
+                                   choices=['hf', 'awq', 'gptq', 'fp8', 'mxfp4'],
                                    help='The format of input model. `hf` means `hf_llama`, '
                                    '`awq` represents the quantized model by AWQ,'
                                    ' and `gptq` refers to the quantized model by GPTQ')
@@ -176,6 +202,16 @@ class ArgumentHelper:
                                    help='expert parallelism. dp is required when pytorch engine is used.')
 
     @staticmethod
+    def cp(parser):
+        """Add argument cp to parser."""
+
+        return parser.add_argument(
+            '--cp',
+            type=int,
+            default=1,
+            help='context parallelism size in attention for turbomind backend, tp must be a multiple of cp.')
+
+    @staticmethod
     def dp_rank(parser):
         """Add argument dp_rank to parser."""
 
@@ -195,6 +231,12 @@ class ArgumentHelper:
         """Add argument num_nodes to parser."""
 
         return parser.add_argument('--nnodes', type=int, default=1, help='The total node nums')
+
+    @staticmethod
+    def dist_init_addr(parser):
+        """Add argument dist_init_addr to parser."""
+
+        return parser.add_argument('--dist-init-addr', type=str, default=None)
 
     @staticmethod
     def session_id(parser):
@@ -301,7 +343,7 @@ class ArgumentHelper:
         import logging
         return parser.add_argument('--log-level',
                                    type=str,
-                                   default='ERROR',
+                                   default='WARNING',
                                    choices=list(logging._nameToLevel.keys()),
                                    help='Set the log level')
 
@@ -346,7 +388,12 @@ class ArgumentHelper:
     def calib_dataset(parser):
         """Add argument calib_dataset to parser."""
 
-        return parser.add_argument('--calib-dataset', type=str, default='ptb', help='The calibration dataset name')
+        return parser.add_argument(
+            '--calib-dataset',
+            type=str,
+            default='wikitext2',
+            choices=['wikitext2', 'c4', 'pileval', 'gsm8k', 'neuralmagic_calibration', 'open-platypus', 'openwebtext'],
+            help='The calibration dataset name.')
 
     @staticmethod
     def calib_samples(parser):
@@ -442,6 +489,16 @@ class ArgumentHelper:
                                    help='Enable server to be terminated by request from client')
 
     @staticmethod
+    def enable_abort_handling(parser):
+        """Add --enable-abort-handling argument to configure server abort
+        request processing."""
+
+        return parser.add_argument('--enable-abort-handling',
+                                   action='store_true',
+                                   default=False,
+                                   help='Enable server to handle client abort requests')
+
+    @staticmethod
     def cache_max_entry_count(parser):
         """Add argument cache_max_entry_count to parser."""
 
@@ -511,6 +568,16 @@ class ArgumentHelper:
                                    help='the max number of forward passes in prefill stage')
 
     @staticmethod
+    def async_(parser):
+        return parser.add_argument('--async',
+                                   type=int,
+                                   default=1,
+                                   choices=[0, 1],
+                                   dest='async_',
+                                   help='Enable async execution (default: 1, enabled). '
+                                   'Set to 0 to disable async mode, 1 to enable it.')
+
+    @staticmethod
     def max_prefill_token_num(parser):
         return parser.add_argument('--max-prefill-token-num',
                                    type=int,
@@ -526,7 +593,7 @@ class ArgumentHelper:
         return parser.add_argument('--max-log-len',
                                    type=int,
                                    default=None,
-                                   help='Max number of prompt characters or prompt tokens being'
+                                   help='Max number of prompt characters or prompt tokens being '
                                    'printed in log. Default: Unlimited')
 
     @staticmethod
@@ -552,8 +619,9 @@ class ArgumentHelper:
         return parser.add_argument('--communicator',
                                    type=str,
                                    default='nccl',
-                                   choices=['nccl', 'native'],
-                                   help='Communication backend for multi-GPU inference')
+                                   choices=['nccl', 'native', 'cuda-ipc'],
+                                   help='Communication backend for multi-GPU inference. The "native" option is '
+                                   'deprecated and serves as an alias for "cuda-ipc"')
 
     @staticmethod
     def enable_microbatch(parser):
@@ -570,9 +638,12 @@ class ArgumentHelper:
         return parser.add_argument('--enable-eplb', action='store_true', help='enable eplb for specified model')
 
     @staticmethod
-    def enable_metrics(parser):
-        """Add argument enable_metrics to parser."""
-        parser.add_argument('--enable-metrics', action='store_true', default=False, help='enable metrics system')
+    def disable_metrics(parser):
+        """Add argument disable_metrics to parser."""
+        return parser.add_argument('--disable-metrics',
+                                   action='store_true',
+                                   default=False,
+                                   help='disable metrics system')
 
     # For Disaggregation
     @staticmethod
@@ -581,9 +652,9 @@ class ArgumentHelper:
                                    type=str,
                                    default='Hybrid',
                                    choices=['Hybrid', 'Prefill', 'Decode'],
-                                   help='Hybrid for Non-Disaggregated Engine;'
-                                   'Prefill for Disaggregated Prefill Engine;'
-                                   'Decode for Disaggregated Decode Engine;')
+                                   help='Hybrid for Non-Disaggregated Engine; '
+                                   'Prefill for Disaggregated Prefill Engine; '
+                                   'Decode for Disaggregated Decode Engine')
 
     @staticmethod
     def migration_backend(parser):
@@ -596,10 +667,88 @@ class ArgumentHelper:
     @staticmethod
     def disable_vision_encoder(parser):
         """Disable loading vision encoder."""
-        parser.add_argument('--disable-vision-encoder',
-                            action='store_true',
-                            default=False,
-                            help='enable metrics system')
+        return parser.add_argument('--disable-vision-encoder',
+                                   action='store_true',
+                                   default=False,
+                                   help='disable multimodal encoder')
+
+    @staticmethod
+    def logprobs_mode(parser):
+        """The mode of logprobs."""
+        return parser.add_argument('--logprobs-mode',
+                                   type=str,
+                                   default=None,
+                                   choices=[None, 'raw_logits', 'raw_logprobs'],
+                                   help='The mode of logprobs.')
+
+    @staticmethod
+    def dllm_block_length(parser):
+        """dllm_block_length for dllm."""
+        return parser.add_argument('--dllm-block-length', type=int, default=None, help='Block length for dllm')
+
+    @staticmethod
+    def dllm_unmasking_strategy(parser):
+        """Dllm unmasking strategy."""
+        return parser.add_argument('--dllm-unmasking-strategy',
+                                   type=str,
+                                   default='low_confidence_dynamic',
+                                   choices=['low_confidence_dynamic', 'low_confidence_static', 'sequential'],
+                                   help='The unmasking strategy for dllm.')
+
+    @staticmethod
+    def dllm_denoising_steps(parser):
+        """Dllm denoising steps."""
+        return parser.add_argument('--dllm-denoising-steps',
+                                   type=int,
+                                   default=None,
+                                   help='The number of denoising steps for dllm.')
+
+    @staticmethod
+    def dllm_confidence_threshold(parser):
+        """Dllm confidence threshold."""
+        return parser.add_argument('--dllm-confidence-threshold',
+                                   type=float,
+                                   default=0.85,
+                                   help='The confidence threshold for dllm.')
+
+    @staticmethod
+    def enable_return_routed_experts(parser):
+        """Add argument return routed experts to parser."""
+
+        return parser.add_argument('--enable-return-routed-experts',
+                                   action='store_true',
+                                   default=False,
+                                   help='Whether to output routed expert ids for replay')
+
+    @staticmethod
+    def add_spec_group(parser):
+        spec_group = parser.add_argument_group('Speculative decoding arguments')
+        spec_group.add_argument('--speculative-algorithm',
+                                type=str,
+                                default=None,
+                                choices=['eagle', 'eagle3', 'deepseek_mtp'],
+                                help='The speculative algorithm to use. `None` means speculative decoding is disabled')
+
+        spec_group.add_argument('--speculative-draft-model',
+                                type=str,
+                                default=None,
+                                help='The path to speculative draft model')
+
+        spec_group.add_argument('--speculative-num-draft-tokens',
+                                type=int,
+                                default=1,
+                                help='The number of speculative tokens to generate per step')
+
+        return spec_group
+
+    @staticmethod
+    def distributed_executor_backend(parser):
+        """Distributed_executor_backend."""
+        return parser.add_argument('--distributed-executor-backend',
+                                   type=str,
+                                   default=None,
+                                   choices=['uni', 'mp', 'ray'],
+                                   help='The distributed executor backend for pytorch engine.')
 
 
 # adapted from https://github.com/vllm-project/vllm/blob/main/vllm/utils/__init__.py

@@ -2,13 +2,13 @@
 from typing import Dict, List
 
 from lmdeploy.utils import get_logger
-from lmdeploy.vl.model.base import VISION_MODELS, VisonModel
+from lmdeploy.vl.model.base import VISION_MODELS, VisionModel
 
 logger = get_logger('lmdeploy')
 
 
 @VISION_MODELS.register_module()
-class CogVLMVisionModel(VisonModel):
+class CogVLMVisionModel(VisionModel):
     """CogVLM vision model."""
 
     _arch = 'CogVLMForCausalLM'
@@ -70,7 +70,7 @@ class CogVLMVisionModel(VisonModel):
             prompt_messages.append(dict(role='user', content=content[0], num_images=n_images))
 
         from lmdeploy.model import Vicuna
-        llm_chat_template = Vicuna(eoa=chat_template.eoa, stop_words=chat_template.stop_words)
+        llm_chat_template = Vicuna(eoa='</s>', stop_words=chat_template.stop_words)
         prompt = ''
         IMAGE_TOKEN = '<IMAGE_TOKEN>'
         for i, msg in enumerate(prompt_messages):

@@ -31,6 +31,15 @@ class OpType(Enum):
     FusedMoEW8A8 = auto()
     LinearBlockedF8 = auto()
     FusedMoEBlockedF8 = auto()
+    NSAIndexFP8 = auto()
+    Embedding = auto()
+
+    # MoE router
+    RouterNoauxTC = auto()
+
+    # Gated Delta
+    CausalConv1d = auto()
+    GatedDeltaRule = auto()
 
 
 class OpsBackend(ABC):

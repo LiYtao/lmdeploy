@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import inspect
 import json
-from dataclasses import asdict, fields
+from dataclasses import asdict, field, fields
 from typing import List
 
 # use pydantic.dataclasses.dataclass to check data type
@@ -54,35 +54,55 @@ class ModelConfig:
     # Therefore, we add a new attr "embedding_size" to represent the vocab dim
     # of token_embedding
     embedding_size: int = 0
-    # for some models like qwen2.5, the vocab size of the model is larger than
-    # the vocab size of the tokenizer.
-    tokenizer_size: int = None
     num_layer: int = None
     inter_size: List[int] = None
     norm_eps: float = None
     attn_bias: int = 0
+    mlp_bias: bool = False
+    window_size: List[int] = field(default_factory=list)
+    attn_sink: bool = False
     qk_norm: bool = False
     size_per_head: int = 128
-    group_size: int = 64
+    group_size: int = 32
+    data_type: str = None
     weight_type: str = None
+    expert_weight_type: str = None
+    ffn_weight_type: str = None
     session_len: int = None
     attn_tp_size: int = 1
+    attn_cp_size: int = 1
     mlp_tp_size: int = 1
     model_format: str = 'hf'
     expert_num: List[int] = ()
+    expert_router_bias: bool = False
     expert_inter_size: int = 0
     experts_per_token: int = 0
+    activation_type: str = ''
     moe_shared_gate: bool = False
     norm_topk_prob: bool = False
     routed_scale: float = 1.0
     topk_group: int = 1
     topk_method: str = 'greedy'
     moe_group_num: int = 1
+    scoring_func: str = 'softmax'
+    router_n_groups: int = -1
     # MLA
     q_lora_rank: int = 0
     kv_lora_rank: int = 0
     qk_rope_dim: int = 0
     v_head_dim: int = 0
+    # Qwen 3.5
+    layer_types: List[str] = field(default_factory=list)
+    linear_key_head_dim: int = 0
+    linear_value_head_dim: int = 0
+    linear_conv_kernel_dim: int = 0
+    linear_num_key_heads: int = 0
+    linear_num_value_heads: int = 0
+    attn_output_gate: bool = False
+    # Per-layer expert weight type override: layer indices whose
+    # MoE experts are unquantized (fp16) despite expert_weight_type=int4.
+    # Populated from modules_to_not_convert patterns like 'model.layers.0.'.
+    unquantized_expert_layers: List[int] = field(default_factory=list)
     # tuning
     tune_layer_num: int = 1
 

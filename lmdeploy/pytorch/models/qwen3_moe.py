@@ -6,22 +6,27 @@ import torch
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
-from lmdeploy.pytorch.distributed import get_dist_manager, get_ep_world_rank, get_tp_world_rank
+from lmdeploy.pytorch.distributed import get_dist_manager, get_ep_world_rank
 from lmdeploy.pytorch.model_inputs import StepContext, StepContextManager
-from lmdeploy.pytorch.nn import (ApplyRotaryEmb, Attention, RMSNorm, RopeType, SiluAndMul, build_rotary_embedding,
-                                 build_rotary_params)
+from lmdeploy.pytorch.nn import ApplyRotaryEmb, Attention, RMSNorm, SiluAndMul, build_rotary_embedding_from_config
 from lmdeploy.pytorch.nn.eplb import EPLBManager
 from lmdeploy.pytorch.nn.linear import build_merged_colwise_linear, build_qkv_proj, build_rowwise_linear
 from lmdeploy.pytorch.nn.moe import SoftmaxTopK, build_fused_moe
 from lmdeploy.pytorch.weight_loader.model_weight_loader import load_weight
 
+from .patch import add_prefix, get_build_model_context
 from .utils.cudagraph import CudaGraphMixin
+from .utils.model import DeployModelMixinV1, build_embedding
 
 
 class Qwen3MoeAttention(nn.Module):
     """Rewrite module of Qwen3MoeAttention."""
 
-    def __init__(self, config: PretrainedConfig, dtype: torch.dtype = None, device: torch.device = None):
+    def __init__(self,
+                 config: PretrainedConfig,
+                 dtype: torch.dtype = None,
+                 device: torch.device = None,
+                 prefix: str = ''):
         super().__init__()
         quantization_config = getattr(config, 'quantization_config', None)
         num_heads = config.num_attention_heads
@@ -42,8 +47,8 @@ class Qwen3MoeAttention(nn.Module):
             num_replicate_kv_heads=num_replicate_kv_heads,
             dtype=dtype,
             device=device,
+            prefix=add_prefix('qkv_proj', prefix),
         )
-
         # rotary embedding
         self.apply_rotary_pos_emb = ApplyRotaryEmb()
 
@@ -53,29 +58,38 @@ class Qwen3MoeAttention(nn.Module):
             head_dim,
             num_kv_heads=num_key_value_heads,
             v_head_size=head_dim,
-            sliding_window=config.sliding_window,
+            sliding_window=getattr(config, 'sliding_window', None),
         )
 
         # o_proj
-        self.o_proj = build_rowwise_linear(num_heads * head_dim,
-                                           hidden_size,
-                                           bias=config.attention_bias,
-                                           quant_config=quantization_config,
-                                           dtype=dtype,
-                                           device=device,
-                                           is_tp=True)
+        self.o_proj = build_rowwise_linear(
+            num_heads * head_dim,
+            hidden_size,
+            bias=config.attention_bias,
+            quant_config=quantization_config,
+            dtype=dtype,
+            device=device,
+            is_tp=True,
+            prefix=add_prefix('o_proj', prefix),
+        )
 
         # q, k norm
-        self.q_norm = RMSNorm(head_dim,
-                              config.rms_norm_eps,
-                              quant_config=quantization_config,
-                              dtype=dtype,
-                              device=device)
-        self.k_norm = RMSNorm(head_dim,
-                              config.rms_norm_eps,
-                              quant_config=quantization_config,
-                              dtype=dtype,
-                              device=device)
+        self.q_norm = RMSNorm(
+            head_dim,
+            config.rms_norm_eps,
+            quant_config=quantization_config,
+            dtype=dtype,
+            device=device,
+            prefix=add_prefix('q_norm', prefix),
+        )
+        self.k_norm = RMSNorm(
+            head_dim,
+            config.rms_norm_eps,
+            quant_config=quantization_config,
+            dtype=dtype,
+            device=device,
+            prefix=add_prefix('k_norm', prefix),
+        )
 
     def forward(
         self,
@@ -133,7 +147,8 @@ class Qwen3MoeMLP(nn.Module):
                  dtype: torch.dtype = None,
                  device: torch.device = None,
                  is_tp: bool = True,
-                 all_reduce: bool = True):
+                 all_reduce: bool = True,
+                 prefix: str = ''):
         super().__init__()
         quantization_config = getattr(config, 'quantization_config', None)
         if intermediate_size is None:
@@ -147,20 +162,24 @@ class Qwen3MoeMLP(nn.Module):
             device=device,
             quant_config=quantization_config,
             is_tp=is_tp,
+            prefix=add_prefix('gate_up_proj', prefix),
         )
 
         # silu and mul
         self.act_fn = SiluAndMul(inplace=True)
 
         # down
-        self.down_proj = build_rowwise_linear(intermediate_size,
-                                              config.hidden_size,
-                                              bias=False,
-                                              quant_config=quantization_config,
-                                              dtype=dtype,
-                                              device=device,
-                                              is_tp=is_tp,
-                                              all_reduce=all_reduce)
+        self.down_proj = build_rowwise_linear(
+            intermediate_size,
+            config.hidden_size,
+            bias=False,
+            quant_config=quantization_config,
+            dtype=dtype,
+            device=device,
+            is_tp=is_tp,
+            all_reduce=all_reduce,
+            prefix=add_prefix('down_proj', prefix),
+        )
 
     def forward(self, x):
         """forward."""
@@ -176,7 +195,8 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                  config: PretrainedConfig,
                  layer_idx: int,
                  dtype: torch.dtype = None,
-                 device: torch.device = None):
+                 device: torch.device = None,
+                 prefix: str = ''):
         super().__init__()
         # TODO: zhouxinyu, determine modules_to_not_convert from config file
         quantization_config = getattr(config, 'quantization_config', None)
@@ -196,11 +216,11 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             device=device,
             is_tp=False,
         )
+        self.softmax_topk = SoftmaxTopK(
+            self.top_k,
+            n_groups=getattr(config, 'router_n_groups', -1),
+        )
 
-        self.softmax_topk = SoftmaxTopK(self.top_k)
-
-        world_size, _ = get_tp_world_rank()
-        _all_reduce = world_size > 1
         if get_dist_manager().current_context().dist_config.enable_eplb:
             dist_ctx = get_dist_manager().current_context()
             self.eplb_dispatch_info = EPLBManager.get_dispatch_info(
@@ -217,16 +237,23 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             dtype=dtype,
             device=device,
             quant_config=quantization_config,
-            all_reduce=_all_reduce,
+            all_reduce=True,
             layer_idx=layer_idx,
+            prefix=add_prefix('experts', prefix),
         )
 
-    def forward(self, hidden_states: torch.Tensor):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        all_routed_experts: torch.Tensor = None,
+    ):
         """forward."""
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         router_logits = self.gate(hidden_states)
         topk_weights, topk_ids = self.softmax_topk(router_logits)
+        if all_routed_experts is not None:
+            all_routed_experts[:, self.layer_idx, :] = topk_ids
         if get_dist_manager().current_context().dist_config.enable_eplb:
             topk_ids = EPLBManager.topk_ids_logical_to_physical(topk_ids, self.eplb_dispatch_info)
         out_states = self.experts(
@@ -242,34 +269,50 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
 class Qwen3MoeDecoderLayer(nn.Module):
     """Decoder layer."""
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 layer_idx: int,
-                 dtype: torch.dtype = None,
-                 device: torch.device = None):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        layer_idx: int,
+        dtype: torch.dtype = None,
+        device: torch.device = None,
+        prefix: str = '',
+    ):
         super().__init__()
         self.layer_idx = layer_idx
         quantization_config = getattr(config, 'quantization_config', None)
 
         # build attention layer
-        self.self_attn = Qwen3MoeAttention(config, dtype=dtype, device=device)
+        self.self_attn = Qwen3MoeAttention(config, dtype=dtype, device=device, prefix=add_prefix('self_attn', prefix))
 
         # build MLP
         if (layer_idx not in config.mlp_only_layers) and (config.num_experts
                                                           > 0) and ((layer_idx + 1) % config.decoder_sparse_step == 0):
-            self.mlp = Qwen3MoeSparseMoeBlock(config, layer_idx=layer_idx, dtype=dtype, device=device)
+            self.mlp = Qwen3MoeSparseMoeBlock(config,
+                                              layer_idx=layer_idx,
+                                              dtype=dtype,
+                                              device=device,
+                                              prefix=add_prefix('mlp', prefix))
         else:
-            self.mlp = Qwen3MoeMLP(config, intermediate_size=config.intermediate_size, dtype=dtype, device=device)
+            self.mlp = Qwen3MoeMLP(config,
+                                   intermediate_size=config.intermediate_size,
+                                   dtype=dtype,
+                                   device=device,
+                                   prefix=add_prefix('mlp', prefix))
 
         # build input layer norm
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        config.rms_norm_eps,
                                        quant_config=quantization_config,
                                        dtype=dtype,
-                                       device=device)
+                                       device=device,
+                                       prefix=add_prefix('input_layernorm', prefix))
 
         # build attention layer norm
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps, dtype=dtype, device=device)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size,
+                                                config.rms_norm_eps,
+                                                dtype=dtype,
+                                                device=device,
+                                                prefix=add_prefix('post_attention_layernorm', prefix))
 
     def forward(
         self,
@@ -278,6 +321,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         past_key_value: Optional[List[torch.FloatTensor]],
         residual: Optional[torch.Tensor] = None,
         attn_metadata: Any = None,
+        all_routed_experts: torch.Tensor = None,
     ):
 
         if residual is None:
@@ -296,7 +340,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states, all_routed_experts=all_routed_experts)
 
         outputs = (hidden_states, residual)
         return outputs
@@ -305,16 +349,21 @@ class Qwen3MoeDecoderLayer(nn.Module):
 class Qwen3MoeModel(nn.Module):
     """model."""
 
-    def __init__(self, config: PretrainedConfig, dtype: torch.dtype = None, device: torch.device = None):
+    def __init__(self,
+                 config: PretrainedConfig,
+                 dtype: torch.dtype = None,
+                 device: torch.device = None,
+                 prefix: str = ''):
         super().__init__()
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-
-        self.embed_tokens = nn.Embedding(config.vocab_size,
-                                         config.hidden_size,
-                                         self.padding_idx,
-                                         dtype=dtype,
-                                         device=device)
+        self.embed_tokens = build_embedding(
+            config.vocab_size,
+            config.hidden_size,
+            self.padding_idx,
+            dtype=dtype,
+            device=device,
+        )
 
         if get_dist_manager().current_context().dist_config.enable_eplb:
             ep_size, _ = get_ep_world_rank()
@@ -326,35 +375,23 @@ class Qwen3MoeModel(nn.Module):
 
         # build all decode layers
         self.layers = nn.ModuleList([
-            Qwen3MoeDecoderLayer(config, layer_idx, dtype=dtype, device=device)
+            Qwen3MoeDecoderLayer(config,
+                                 layer_idx,
+                                 dtype=dtype,
+                                 device=device,
+                                 prefix=add_prefix(f'layers.{layer_idx}', prefix))
             for layer_idx in range(config.num_hidden_layers)
         ])
 
         # build norm
-        self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps, dtype=dtype, device=device)
+        self.norm = RMSNorm(config.hidden_size,
+                            config.rms_norm_eps,
+                            dtype=dtype,
+                            device=device,
+                            prefix=add_prefix('norm', prefix))
 
         # build rotary embedding
-        self.rotary_emb = self._build_rotary_embedding(config)
-
-    def _build_rotary_embedding(self, config: PretrainedConfig):
-        """Build rotary embedding."""
-
-        emb_type = RopeType.LinearScaling
-        rope_dim = config.head_dim
-        rope_max_pos_emb = config.max_position_embeddings
-        rope_base = config.rope_theta
-        rotary_params = dict(
-            dim=rope_dim,
-            max_position_embeddings=rope_max_pos_emb,
-            base=rope_base,
-            emb_type=emb_type,
-        )
-
-        update_params = build_rotary_params(config)
-        rotary_params.update(update_params)
-
-        # default implementation
-        return build_rotary_embedding(**rotary_params)
+        self.rotary_emb = build_rotary_embedding_from_config(config, device=device)
 
     def forward(
         self,
@@ -363,6 +400,7 @@ class Qwen3MoeModel(nn.Module):
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         attn_metadata: Any = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
+        all_routed_experts: torch.Tensor = None,
     ):
         """Rewrite of LlamaModel.forward."""
 
@@ -387,6 +425,7 @@ class Qwen3MoeModel(nn.Module):
                 past_key_value=past_key_value,
                 residual=residual,
                 attn_metadata=attn_metadata,
+                all_routed_experts=all_routed_experts,
             )
 
         # norm
@@ -399,7 +438,7 @@ class Qwen3MoeModel(nn.Module):
         return self.embed_tokens
 
 
-class Qwen3MoeForCausalLM(nn.Module, CudaGraphMixin):
+class Qwen3MoeForCausalLM(nn.Module, DeployModelMixinV1, CudaGraphMixin):
     """ModelForCausalLM."""
 
     packed_modules_mapping = {
@@ -414,22 +453,31 @@ class Qwen3MoeForCausalLM(nn.Module, CudaGraphMixin):
         ],
     }
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 ctx_mgr: StepContextManager,
-                 dtype: torch.dtype = None,
-                 device: torch.device = None):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        ctx_mgr: StepContextManager,
+        dtype: torch.dtype = None,
+        device: torch.device = None,
+        prefix: str = '',
+    ):
         super().__init__()
         self.config = config
         self.ctx_mgr = ctx_mgr
+
         # build model
-        self.model = Qwen3MoeModel(config, dtype=dtype, device=device)
+        self.model = Qwen3MoeModel(config, dtype=dtype, device=device, prefix=add_prefix('model', prefix))
         # build lm_head
-        self.lm_head = build_rowwise_linear(config.hidden_size,
-                                            config.vocab_size,
-                                            bias=False,
-                                            dtype=dtype,
-                                            device=device)
+        self.lm_head = self.build_lm_head(
+            config.hidden_size,
+            config.vocab_size,
+            bias=False,
+            dtype=dtype,
+            device=device,
+        )
+        # for router replay
+        bm_ctx = get_build_model_context()
+        self.enable_return_routed_experts = bm_ctx.enable_return_routed_experts
 
     def forward(
         self,
@@ -441,18 +489,28 @@ class Qwen3MoeForCausalLM(nn.Module, CudaGraphMixin):
         **kwargs,
     ):
         """Model forward, return logits."""
+
+        # router replay
+        all_routed_experts = None
+        if self.enable_return_routed_experts:
+            if inputs_embeds is not None:
+                num_tokens = inputs_embeds.size(1)
+            else:
+                num_tokens = input_ids.size(1)
+            all_routed_experts = position_ids.new_empty(
+                (num_tokens, self.config.num_hidden_layers, self.config.num_experts_per_tok), dtype=torch.uint16)
+
         hidden_states = self.model(
             input_ids=input_ids,
             position_ids=position_ids,
             past_key_values=past_key_values,
             attn_metadata=attn_metadata,
             inputs_embeds=inputs_embeds,
+            all_routed_experts=all_routed_experts,
         )
-        return hidden_states
-
-    def get_logits(self, hidden_states: torch.Tensor):
-        """Compute logits of the model output."""
-        return self.lm_head(hidden_states)
+        if all_routed_experts is None:
+            return hidden_states
+        return dict(hidden_states=hidden_states, all_routed_experts=all_routed_experts)
 
     def get_input_embeddings(self):
         """Get input embeddings."""

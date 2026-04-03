@@ -5,6 +5,7 @@ from lmdeploy.messages import EngineOutput, GenerationConfig
 from lmdeploy.utils import get_logger
 
 from ..messages import SamplingParam
+from .base import EngineInstanceBase
 from .engine import Engine
 from .request import RequestSender, RequestType, Response, ResponseType
 
@@ -71,7 +72,7 @@ def cancel(req_sender: RequestSender, session_id: int):
                                f'Error: {resp.type}.'))
 
 
-class EngineInstance:
+class EngineInstance(EngineInstanceBase):
     """Instance of TurboMind.
 
     Args:
@@ -83,10 +84,28 @@ class EngineInstance:
         self.req_sender = engine.req_manager.build_sender()
 
         self.max_input_len = self.engine.max_session_len
+        self._enable_transfer_obj_ref = engine.engine_config.enable_transfer_obj_ref and \
+            engine.engine_config.distributed_executor_backend == 'ray'
 
     def __del__(self):
         """Destructor."""
         self.engine.req_manager.senders.pop(self.req_sender.sender_id)
+
+    def _get_extra_outputs(self, resp: Response):
+        """Get extra outputs."""
+        outputs = dict(routed_experts=None)
+        routed_experts = resp.data.get('routed_experts', None) if resp.data else None
+        if routed_experts is not None and resp.type in [ResponseType.FINISH, ResponseType.CANCEL]:
+            if self._enable_transfer_obj_ref:
+                import pybase64
+                import ray
+
+                ref = ray.put(routed_experts)
+                data = ray.cloudpickle.dumps(ref)
+                outputs['routed_experts'] = pybase64.b64encode(data).decode('utf-8')
+            else:
+                outputs['routed_experts'] = routed_experts
+        return outputs
 
     async def _async_try_add_session(self, session_id: int):
         """Add new session.
@@ -125,7 +144,7 @@ class EngineInstance:
             int: The number of the output tokens.
         """
         if len(input_ids) > self.max_input_len:
-            yield EngineOutput(ResponseType.INPUT_LENGTH_ERROR, [], 0)
+            yield EngineOutput(ResponseType.INPUT_LENGTH_ERROR, [])
             return
         gen_config = gen_config or GenerationConfig()
         sampling_param = SamplingParam.from_gen_config(gen_config=gen_config)
@@ -143,37 +162,50 @@ class EngineInstance:
         )
         logger.debug(f'session[{session_id}] add message: num_input_ids={len(input_ids)}.')
         resp = self.req_sender.send_async(RequestType.ADD_MESSAGE, msg)
+        output_offset = 0
 
         while True:
-            resp = await self.req_sender.async_recv(resp)
+            resp = await self.req_sender.async_recv(resp, wait_main=True)
 
             cache_block_ids = resp.data.get('cache_block_ids', None) if resp.data else None
-            metrics_info = resp.data.get('metrics_info', None) if resp.data else None
+            req_metrics = resp.data.get('req_metrics', None) if resp.data else None
+            logprobs = resp.data.pop('logprobs', None) if resp.data else None
+            extra_outputs = self._get_extra_outputs(resp)
+            routed_experts = extra_outputs.get('routed_experts', None)
+
             if resp.type == ResponseType.SUCCESS:
-                token_ids = resp.data['token_ids'].tolist()
-                num_ids = len(token_ids)
+                token_ids = resp.data['token_ids']
+                num_ids = len(token_ids) - output_offset
                 logger.debug(f'session[{session_id}] success: num_out_ids={num_ids}.')
                 yield EngineOutput(resp.type,
-                                   token_ids,
-                                   num_ids,
+                                   token_ids[output_offset:].tolist(),
                                    cache_block_ids=cache_block_ids,
-                                   metrics_info=metrics_info)
-            elif resp.type == ResponseType.FINISH:
+                                   req_metrics=req_metrics,
+                                   routed_experts=routed_experts,
+                                   logprobs=logprobs)
+                output_offset = len(token_ids)
+            elif resp.type in (ResponseType.FINISH, ResponseType.CANCEL):
                 resp_data = resp.data
-                token_ids = resp_data['token_ids'].tolist()
-                logits = resp_data['logits']
-                num_ids = len(token_ids)
+                if resp_data is None:
+                    # request might be cancelled before any output
+                    token_ids = []
+                    logits = None
+                else:
+                    token_ids = resp_data['token_ids'][output_offset:].tolist()
+                    logits = resp_data.get('logits', None)
+                num_ids = len(token_ids) - output_offset
                 logger.debug(f'session[{session_id}] finish: num_out_ids={num_ids}.')
                 yield EngineOutput(resp.type,
                                    token_ids,
-                                   num_ids,
                                    logits=logits,
                                    cache_block_ids=cache_block_ids,
-                                   metrics_info=metrics_info)
+                                   req_metrics=req_metrics,
+                                   routed_experts=routed_experts,
+                                   logprobs=logprobs)
                 break
             else:
                 logger.debug(f'session[{session_id}] failed.')
-                yield EngineOutput(resp.type, [], 0)
+                yield EngineOutput(resp.type, [])
                 break
 
     async def async_infer(self,

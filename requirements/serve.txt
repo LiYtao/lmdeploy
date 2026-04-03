@@ -1,6 +1,7 @@
-gradio
+aiohttp
+prometheus_client
 protobuf
-tritonclient[grpc]
+timm!=1.0.23
 ## add by yijian
 bceidaas==0.0.1.dev2
 bceserver

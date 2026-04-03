@@ -3,9 +3,9 @@ import asyncio
 import enum
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List
+from typing import Any, Awaitable, Callable, Coroutine, Dict, List
 
-from lmdeploy.messages import MetricsInfo, ResponseType
+from lmdeploy.messages import RequestMetrics, ResponseType
 from lmdeploy.utils import get_logger
 
 logger = get_logger('lmdeploy')
@@ -31,7 +31,8 @@ class Response:
     event: asyncio.Event
     data: Any = None
     err_msg: str = ''
-    metrics_info: MetricsInfo = None
+    is_done: bool = False
+    req_metrics: RequestMetrics = None
 
 
 @dataclass
@@ -108,7 +109,7 @@ class RequestSender:
         resps = []
         for rtype, rdata in zip(req_types, data):
             event = asyncio.Event()
-            resp = Response(type=ResponseType.HANDLER_NOT_EXIST,
+            resp = Response(type=ResponseType.INTERNAL_ENGINE_ERROR,
                             sender_id=self.sender_id,
                             event=event,
                             data=None,
@@ -128,8 +129,10 @@ class RequestSender:
         """Send request asynchronize."""
         return self.batched_send_async(req_types=[req_type], data=[data])[0]
 
-    async def async_recv(self, resp: Response) -> Response:
+    async def async_recv(self, resp: Response, wait_main: bool = False) -> Response:
         """Receive response of given request id async."""
+        if wait_main:
+            await self.manager.prepare_send()
         event = resp.event
         while not event.is_set():
             try:
@@ -138,6 +141,7 @@ class RequestSender:
                 if self.is_loop_alive():
                     continue
                 logger.debug('Engine main loop failed.')
+                resp.type = ResponseType.ENGINE_STOP_ERROR
                 break
         event.clear()
         return resp
@@ -173,15 +177,75 @@ class RequestManager:
         self._loop_coro: Callable = None
         self._next_sender_id = 0
 
+        # sender speed limiter
+        self._condition: asyncio.Condition = None
+        self._sender_wait_task: asyncio.Task = None
+        self._send_count = 0
+        self._send_event = None
+
+    async def prepare_send(self):
+        if self._condition is None:
+            return
+
+        self._send_count += 1
+        self._send_event.set()
+        async with self._condition:
+            await self._condition.wait()
+        self._send_count -= 1
+        if self._send_count == 0:
+            self._send_event.clear()
+
+    async def sender_wait_loop(self):
+        """Wait for loop to be created."""
+        self._condition = asyncio.Condition()
+        self._send_count = 0
+        self._send_event = asyncio.Event()
+
+        try:
+            while True:
+                await self._send_event.wait()
+                # notify one sender to control send speed
+                async with self._condition:
+                    self._condition.notify()
+                await asyncio.sleep(0.0001)
+        finally:
+            # notify all senders to exit
+            async with self._condition:
+                self._condition.notify_all()
+            self._condition = None
+            self._send_event = None
+
     def create_loop_task(self):
         """Create coro task."""
+        if self._loop_task is not None:
+            logger.debug('loop task has been created.')
+            return self._loop_task
         logger.debug('creating engine loop task.')
         event_loop = asyncio.get_event_loop()
         assert self._loop_coro is not None, ('Please set loop task with manager.start_loop')
         loop_unshielded = event_loop.create_task(self._loop_coro(), name='EngineMainLoop')
-        self._loop_task = asyncio.shield(loop_unshielded)
+        self._loop_task = loop_unshielded
+        self._sender_wait_task = event_loop.create_task(self.sender_wait_loop(), name='SenderWaitLoop')
         self.requests = asyncio.Queue()
         return self._loop_task
+
+    async def wait_tasks(self):
+        """Wait for loop task and sender wait task to finish."""
+        if self._loop_task is None:
+            return
+
+        try:
+            await self._loop_task
+        except asyncio.CancelledError:
+            logger.info('Engine main loop task has been cancelled.')
+            raise
+        finally:
+            if self._sender_wait_task is not None:
+                self._sender_wait_task.cancel()
+                try:
+                    await self._sender_wait_task
+                except Exception:
+                    logger.debug('Sender wait task has been cancelled.')
 
     @property
     def event_loop(self):
@@ -191,13 +255,17 @@ class RequestManager:
         else:
             return self._loop_task.get_loop()
 
-    def start_loop(self, loop: asyncio.Task):
+    def set_main_loop_func(self, loop: Callable[[Coroutine], asyncio.Task]):
         """Start main loop."""
         self._loop_coro = loop
 
     def stop_loop(self):
         if self.is_loop_alive():
             self._loop_task.cancel()
+        self._loop_task = None
+        if self._sender_wait_task is not None:
+            self._sender_wait_task.cancel()
+            self._sender_wait_task = None
 
     def is_loop_alive(self):
         """Check if main loop is alive."""
@@ -225,7 +293,7 @@ class RequestManager:
             return False
         return not self.requests.empty()
 
-    async def get_all_requests(self) -> Dict[RequestType, Request]:
+    async def get_all_requests(self) -> Dict[RequestType, List[Request]]:
         """Get all requests in current queue."""
         num_reqs = self.requests.qsize()
         reqs: ReqList = []
@@ -247,7 +315,7 @@ class RequestManager:
             __proc_reqs(elem)
 
         # gather requests
-        reqs_by_type: Dict[RequestType, Request] = dict((t, []) for t in RequestType)
+        reqs_by_type: Dict[RequestType, List[Request]] = dict((t, []) for t in RequestType)
         for req in reqs:
             reqs_by_type[req.type].append(req)
         return reqs_by_type
@@ -300,11 +368,10 @@ class RequestManager:
 
         # handle requests
         for req_type in self.request_priority:
-            # request exists
-            if req_type not in reqs_by_type or len(reqs_by_type) == 0:
+            reqs: ReqList = reqs_by_type.get(req_type, [])
+            if not reqs:
                 continue
 
-            reqs: ReqList = reqs_by_type[req_type]
             _log_reqs(reqs)
             self.process_request(req_type, reqs, **kwargs)
 
