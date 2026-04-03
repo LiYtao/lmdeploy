@@ -49,6 +49,29 @@ __device__ __forceinline__ float sq_acc(T val)
 }
 
 #if defined(__CUDA_ARCH__)
+
+// Compatibility: __bfloat1622float2 / __float22bfloat162_rn may not exist in CUDA 11.x
+__device__ __forceinline__ float2 compat_bf1622float2(nv_bfloat162 val)
+{
+#if CUDART_VERSION >= 12000
+    return __bfloat1622float2(val);
+#else
+    return make_float2(__bfloat162float(val.x), __bfloat162float(val.y));
+#endif
+}
+
+__device__ __forceinline__ nv_bfloat162 compat_float22bf162_rn(float2 v)
+{
+#if CUDART_VERSION >= 12000
+    return __float22bfloat162_rn(v);
+#else
+    nv_bfloat162 r;
+    r.x = __float2bfloat16_rn(v.x);
+    r.y = __float2bfloat16_rn(v.y);
+    return r;
+#endif
+}
+
 __device__ __forceinline__ float sq_acc(half2 val)
 {
     float2 fval = __half22float2(val);
@@ -56,7 +79,7 @@ __device__ __forceinline__ float sq_acc(half2 val)
 }
 __device__ __forceinline__ float sq_acc(nv_bfloat162 val)
 {
-    float2 fval = __bfloat1622float2(val);
+    float2 fval = compat_bf1622float2(val);
     return fval.x * fval.x + fval.y * fval.y;
 }
 
@@ -66,7 +89,7 @@ __device__ __forceinline__ float2 to_float2(half2 v)
 }
 __device__ __forceinline__ float2 to_float2(nv_bfloat162 v)
 {
-    return __bfloat1622float2(v);
+    return compat_bf1622float2(v);
 }
 __device__ __forceinline__ half2 to_vec2(float2 v, half)
 {
@@ -74,7 +97,7 @@ __device__ __forceinline__ half2 to_vec2(float2 v, half)
 }
 __device__ __forceinline__ nv_bfloat162 to_vec2(float2 v, nv_bfloat16)
 {
-    return __float22bfloat162_rn(v);
+    return compat_float22bf162_rn(v);
 }
 #endif
 
