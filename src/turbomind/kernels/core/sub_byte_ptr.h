@@ -2,7 +2,17 @@
 
 #pragma once
 
+#include "src/turbomind/kernels/core/common.h"
 #include "src/turbomind/kernels/core/data_type.h"
+
+#if !defined(__CUDACC__)
+#ifndef __host__
+#define __host__
+#endif
+#ifndef __device__
+#define __device__
+#endif
+#endif
 
 namespace turbomind {
 

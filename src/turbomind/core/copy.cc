@@ -52,6 +52,7 @@ namespace {
 const auto& GetCopyAPI()
 {
     static auto inst = []() -> std::variant<std::monostate, PFN_cuMemcpyBatchAsync_v12080> {
+#if CUDART_VERSION >= 12000
         const auto                      symbol = "cuMemcpyBatchAsync";
         cudaDriverEntryPointQueryResult status{};
         void*                           fpn{};
@@ -59,9 +60,8 @@ const auto& GetCopyAPI()
         if (fpn && status == cudaDriverEntryPointSuccess) {
             return (PFN_cuMemcpyBatchAsync_v12080)fpn;
         }
-        else {
-            return {};
-        }
+#endif
+        return {};
     }();
     return inst;
 }
