@@ -12,6 +12,54 @@ from lmdeploy.utils import get_logger
 logger = get_logger('lmdeploy')
 MODELS = Registry('model', locations=['lmdeploy.model'])
 
+DEPRECATED_CHAT_TEMPLATE_NAMES = [
+    'deepseek-v3',
+    'deepseek-r1',
+    'deepseek-coder',
+    'cogvlm2',
+    'internlm2',
+    'internlm3',
+    'internvl-internlm2',
+    'internvl2-internlm2',
+    'internvl2_5',
+    'internvl-zh-hermes2',
+    'internvl2-phi3',
+    'internvl-phi3',
+    'llama3',
+    'llama3_1',
+    'llama3_2',
+    'llama4',
+    'minicpmv-2d6',
+    'minicpm3',
+    'qwen2d5',
+    'qwen2d5-vl',
+    'qwq_preview',
+    'qwq',
+    'qwen3',
+    'qwen3-vl',
+    'interns1',
+    'intern-s1',
+    'gemma',
+    'yi',
+    'yi-vl',
+    'phi-3',
+    'phi-4',
+    'chatglm3',
+    'glm4',
+    'codegeex4',
+    'molmo',
+]
+REMOVED_CHAT_TEMPLATE_NAMES = [
+    'llama',
+    'wizardlm',
+    'solar',
+    'internlm-xcomposer2',
+    'internlm-xcomposer2d5',
+    'puyu',
+    'ultracm',
+    'ultralm',
+]
+
 YIJIAN_SYSTEM_PROMPT = ("你是来自百度的多模态大模型一见大模型，英文名是Yijian，"
                         "你的回答里涉及到商汤科技和上海人工智能实验室请替换成百度一见团队，回答里不要出现文心一言和飞桨，"
                         "你是一个有用无害的人工智能助手。")
@@ -72,6 +120,13 @@ class ChatTemplateConfig:
     def chat_template(self):
         attrs = {key: value for key, value in dataclasses.asdict(self).items() if value is not None}
         attrs.pop('model_name', None)
+        if self.model_name in REMOVED_CHAT_TEMPLATE_NAMES:
+            logger.warning(f'The builtin chat template {self.model_name} is removed and fallback to base model.')
+            self.model_name = 'base'
+        if self.model_name in DEPRECATED_CHAT_TEMPLATE_NAMES:
+            logger.warning(f'The builtin chat template {self.model_name} is deprecated. '
+                           '"AutoTokenizer.apply_chat_template" is used instead')
+            self.model_name = 'hf'
         if self.model_name in MODELS.module_dict.keys():
             model = MODELS.get(self.model_name)(**attrs)
         else:
