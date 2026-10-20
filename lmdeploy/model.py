@@ -13,6 +13,65 @@ from lmdeploy.utils import get_logger
 logger = get_logger('lmdeploy')
 MODELS = Registry('model', locations=['lmdeploy.model'])
 
+# Builtin chat templates that upstream has deprecated: when explicitly
+# requested, redirect to the HuggingFace ``apply_chat_template`` path ('hf')
+# instead of silently falling back to a generic BaseChatTemplate.
+DEPRECATED_CHAT_TEMPLATE_NAMES = [
+    'deepseek-v3',
+    'deepseek-r1',
+    'deepseek-coder',
+    'cogvlm2',
+    'internlm2',
+    'internlm3',
+    'internvl-internlm2',
+    'internvl2-internlm2',
+    'internvl2_5',
+    'internvl-zh-hermes2',
+    'internvl2-phi3',
+    'internvl-phi3',
+    'llama3',
+    'llama3_1',
+    'llama3_2',
+    'llama4',
+    'minicpmv-2d6',
+    'minicpm3',
+    'qwen2d5',
+    'qwen2d5-vl',
+    'qwq_preview',
+    'qwq',
+    'qwen3',
+    'qwen3-vl',
+    'interns1',
+    'intern-s1',
+    'gemma',
+    'yi',
+    'yi-vl',
+    'phi-3',
+    'phi-4',
+    'chatglm3',
+    'glm4',
+    'codegeex4',
+    'molmo',
+]
+# Builtin chat templates that upstream has removed: fall back to the base model.
+REMOVED_CHAT_TEMPLATE_NAMES = [
+    'llama',
+    'wizardlm',
+    'solar',
+    'internlm-xcomposer2',
+    'internlm-xcomposer2d5',
+    'puyu',
+    'ultracm',
+    'ultralm',
+]
+
+# yijian platform default system prompt. Used as the default `meta_instruction`
+# for the HuggingFace ``apply_chat_template`` path so deployed models identify
+# themselves as Baidu's "一见" model when the request carries no system message.
+YIJIAN_SYSTEM_PROMPT = ('你是来自百度的多模态大模型一见大模型，英文名是Yijian，'
+                        '你的回答里涉及到商汤科技和上海人工智能实验室请替换成百度一见团队，回答里不要出现文心一言和飞桨，'
+                        '你是一个有用无害的人工智能助手。')
+
 
 def random_uuid() -> str:
     """Return a random uuid."""
@@ -72,6 +131,13 @@ class ChatTemplateConfig:
     def chat_template(self, trust_remote_code: bool = False):
         attrs = {key: value for key, value in dataclasses.asdict(self).items() if value is not None}
         attrs.pop('model_name', None)
+        if self.model_name in REMOVED_CHAT_TEMPLATE_NAMES:
+            logger.warning(f'The builtin chat template {self.model_name} is removed and fallback to base model.')
+            self.model_name = 'base'
+        if self.model_name in DEPRECATED_CHAT_TEMPLATE_NAMES:
+            logger.warning(f'The builtin chat template {self.model_name} is deprecated. '
+                           '"AutoTokenizer.apply_chat_template" is used instead')
+            self.model_name = 'hf'
         if self.model_name in MODELS.module_dict.keys():
             model = MODELS.get(self.model_name)(**attrs, trust_remote_code=trust_remote_code)
         else:
@@ -762,8 +828,13 @@ class HFChatTemplate(BaseChatTemplate):
     It MUST be at the end of @MODELS registry
     """
 
-    def __init__(self, model_path: str = '', trust_remote_code: bool = False, **kwargs):
+    def __init__(self,
+                 model_path: str = '',
+                 trust_remote_code: bool = False,
+                 meta_instruction: str | None = YIJIAN_SYSTEM_PROMPT,
+                 **kwargs):
         self.model_path = model_path
+        self.meta_instruction = meta_instruction
         try:
             from transformers import AutoProcessor, AutoTokenizer
             self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=trust_remote_code)
@@ -781,6 +852,10 @@ class HFChatTemplate(BaseChatTemplate):
             # Verify if the model can perform apply_chat_template with different roles.
             self.user_start, self.user_end, _, _ = self._user_instruction()
             self.assistant_start, self.assistant_end, _, _ = self._assistant_instruction()
+            # Whether the underlying chat template supports a `system` role. The default
+            # meta_instruction can only be injected when a system role is supported.
+            system_start, _, _, _ = self._system_instruction()
+            self.support_system_role = system_start is not None
             self.stop_words = []
             if hasattr(self.tokenizer, 'eos_token') and self.tokenizer.eos_token is not None:
                 self.stop_words.append(self.tokenizer.eos_token)
@@ -802,6 +877,12 @@ class HFChatTemplate(BaseChatTemplate):
             messages = [{'role': 'user', 'content': messages}]
         assert all(isinstance(m, dict) and 'role' in m and 'content' in m for m in messages), \
             'Each message should be a dict with "role" and "content" keys.'
+
+        # Inject the default system prompt (e.g. yijian branding) when the chat
+        # template supports a system role and the request carries none of its own.
+        if self.meta_instruction and self.support_system_role \
+                and not any(m['role'] == 'system' for m in messages):
+            messages = [{'role': 'system', 'content': self.meta_instruction}] + messages
 
         if 'enable_thinking' in kwargs and kwargs['enable_thinking'] is None:
             # Workaround for internlm/Intern-S1: when enable_thinking=None passed apply_chat_template,

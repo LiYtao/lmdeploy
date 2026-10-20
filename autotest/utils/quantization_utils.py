@@ -2,6 +2,8 @@ import os
 import subprocess
 from subprocess import PIPE
 
+from lmdeploy.utils import is_bf16_supported
+
 from utils.config_utils import get_model_path_from_config, get_model_work_path
 
 
@@ -42,7 +44,8 @@ def quantization(config,
     if 'llama-3' in origin_model_name.lower():
         quantization_cmd += ' --search-scale'
 
-    if quantization_type == 'gptq' or str(config.get('env_tag')) == '3090' or str(config.get('env_tag')) == '5080':
+    if quantization_type == 'gptq' or str(config.get('env_tag')) == '3090' or str(
+            config.get('env_tag')) == '5080' or not is_bf16_supported():
         quantization_cmd += ' --batch-size 8'
     else:
         quantization_cmd += ' --batch-size 32'

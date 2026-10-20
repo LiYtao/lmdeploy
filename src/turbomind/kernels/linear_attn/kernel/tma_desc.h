@@ -10,6 +10,13 @@
 
 namespace turbomind::linear_attn::delta_rule {
 
+// TMA (Tensor Memory Accelerator) descriptor helpers rely on CUtensorMap and
+// the cuTensorMapEncodeTiled driver API, both introduced in CUDA 12.0, plus
+// sm_90 tensormap PTX. They are only referenced by the arch-gated sm_90/sm_120
+// kernels. Compile them out on CUDA < 12.0 so a CUDA 11.8 build (pre-sm_90
+// archs only) still compiles this unconditionally-built translation unit.
+#if CUDA_VERSION >= 12000
+
 CUtensorMap MakeTmaDesc(void*               global_address,
                         CUtensorMapDataType data_type,
                         uint32_t            rank,
@@ -45,5 +52,7 @@ __device__ __forceinline__ void PublishTmaDescriptor(CUtensorMap* gmem_desc, CUt
         :
         : "l"(gmem_ptr), "r"(smem_ptr));
 }
+
+#endif  // CUDA_VERSION >= 12000
 
 }  // namespace turbomind::linear_attn::delta_rule

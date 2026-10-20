@@ -78,8 +78,15 @@ def get_chat_template(chat_template: str | None, model_path: str | None = None):
         if os.path.isfile(chat_template):
             return ChatTemplateConfig.from_json(chat_template)
         else:
-            from lmdeploy.model import MODELS
-            assert chat_template in MODELS.module_dict.keys(), \
+            from lmdeploy.model import DEPRECATED_CHAT_TEMPLATE_NAMES, MODELS, REMOVED_CHAT_TEMPLATE_NAMES
+            # Deprecated/removed builtin names are no longer in the MODELS registry, so a bare
+            # `assert chat_template in MODELS.module_dict` would reject e.g. `--chat-template qwen2d5`.
+            # Accept them here and let ChatTemplateConfig.chat_template() perform the redirect
+            # (DEPRECATED -> 'hf', REMOVED -> 'base'); that keeps a single source of truth in model.py
+            # and the CLI consistent with the Python/HTTP paths.
+            assert chat_template in MODELS.module_dict.keys() \
+                or chat_template in DEPRECATED_CHAT_TEMPLATE_NAMES \
+                or chat_template in REMOVED_CHAT_TEMPLATE_NAMES, \
                 f"chat template '{chat_template}' is not " \
                 f'registered. The builtin chat templates are: ' \
                 f'{MODELS.module_dict.keys()}'

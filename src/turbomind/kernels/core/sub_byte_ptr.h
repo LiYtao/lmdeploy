@@ -4,6 +4,18 @@
 
 #include "src/turbomind/kernels/core/data_type.h"
 
+// Compatibility: when this header is pulled into a host-only (non-nvcc)
+// translation unit, __host__/__device__ are undefined. Define them as no-ops
+// so the qualified members below still compile.
+#if !defined(__CUDACC__)
+#ifndef __host__
+#define __host__
+#endif
+#ifndef __device__
+#define __device__
+#endif
+#endif
+
 namespace turbomind {
 
 template<class T>

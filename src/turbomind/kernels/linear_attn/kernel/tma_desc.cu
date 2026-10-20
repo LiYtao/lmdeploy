@@ -5,6 +5,11 @@
 
 #include <cuda_runtime.h>
 
+// TMA descriptor encoding uses CUtensorMap / cuTensorMapEncodeTiled (CUDA 12.0+)
+// and is only invoked by the arch-gated sm_90/sm_120 kernels. Compile it out on
+// CUDA < 12.0 so a CUDA 11.8 build still compiles this unconditional TU.
+#if CUDA_VERSION >= 12000
+
 namespace turbomind::linear_attn::delta_rule {
 namespace {
 
@@ -60,3 +65,5 @@ CUtensorMap MakeTmaDesc(void*               global_address,
 }
 
 }  // namespace turbomind::linear_attn::delta_rule
+
+#endif  // CUDA_VERSION >= 12000
