@@ -62,6 +62,7 @@ using MemcpyBatchAsync = std::variant<std::monostate, PFN_cuMemcpyBatchAsync_v12
 template<class F>
 F QueryDriverEntryPoint(const char* symbol, unsigned cuda_version)
 {
+#if CUDA_VERSION >= 12000
     cudaDriverEntryPointQueryResult status = cudaDriverEntryPointSymbolNotFound;
     void*                           fpn{};
 #if CUDA_VERSION >= 13000
@@ -78,6 +79,13 @@ F QueryDriverEntryPoint(const char* symbol, unsigned cuda_version)
         return {};
     }
     return reinterpret_cast<F>(fpn);
+#else
+    // CUDA < 12.0 lacks cudaDriverEntryPointQueryResult / cuMemcpyBatchAsync;
+    // fall back to serialized Copy() by reporting the symbol as unavailable.
+    (void)symbol;
+    (void)cuda_version;
+    return {};
+#endif
 }
 
 const MemcpyBatchAsync& GetMemcpyBatchAsync()

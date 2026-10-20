@@ -92,7 +92,7 @@ jobs:
     environment: 'prod'
     needs:
       - linux-build
-      - windows-build
+#      - windows-build
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4

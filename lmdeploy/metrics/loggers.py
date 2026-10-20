@@ -8,6 +8,7 @@ from datetime import datetime
 import numpy as np
 
 from lmdeploy.metrics.stats import IterationStats, RequestStats, SchedulerStats, SpeculativeDecodingStats
+from lmdeploy.messages import ResponseType
 from lmdeploy.utils import get_logger
 
 logger = get_logger('lmdeploy')
@@ -259,6 +260,50 @@ class PrometheusStatLogger(StatLoggerBase):
         for reason in ResponseType:
             self.counter_request_success[reason] = counter_request_success_base.labels(*(labelvalues + [str(reason)]))
 
+        # 推理请求计数器
+        self.counter_inference_count = prometheus_client.Counter(
+            name='lmdeploy:nv_inference_count_total',
+            documentation='Count of inferences performed (does not include cached requests)',
+            labelnames=labelnames).labels(*labelvalues)
+
+        # 成功推理请求计数器
+        self.counter_inference_request_success = prometheus_client.Counter(
+            name='lmdeploy:nv_inference_request_success_total',
+            documentation='Count of successful inference requests (FINISH state only)',
+            labelnames=labelnames).labels(*labelvalues)
+
+        # 失败推理请求计数器
+        self.counter_inference_request_failure = prometheus_client.Counter(
+            name='lmdeploy:nv_inference_request_failure_total',
+            documentation='Count of failed inference requests',
+            labelnames=labelnames).labels(*labelvalues)
+
+        # 端到端推理延迟
+        self.counter_inference_request_duration_us = prometheus_client.Counter(
+            name='lmdeploy:nv_inference_request_duration_us_total',
+            documentation='Cumulative inference request duration in microseconds',
+            labelnames=labelnames).labels(*labelvalues)
+
+        # 根据 Prometheus 规范, Counter 类型的参数必须以 _total 为后缀
+        # 为了与 triton 的参数名完全一致, 只能额外使用 Gauge 再定义一遍,
+        # 这些参数不如 Counter 类型的准确
+        self.gauge_inference_count = prometheus_client.Gauge(
+            name='nv_inference_count',
+            documentation='Number of inferences performed (does not include cached requests)',
+            labelnames=labelnames).labels(*labelvalues)
+        self.gauge_inference_request_success = prometheus_client.Gauge(
+            name='nv_inference_request_success',
+            documentation='Count of successful inference requests (FINISH state only)',
+            labelnames=labelnames).labels(*labelvalues)
+        self.gauge_inference_request_failure = prometheus_client.Gauge(
+            name='nv_inference_request_failure',
+            documentation='Count of failed inference requests',
+            labelnames=labelnames).labels(*labelvalues)
+        self.gauge_inference_request_duration_us = prometheus_client.Gauge(
+            name='nv_inference_request_duration_us',
+            documentation='Cumulative inference request duration in microseconds',
+            labelnames=labelnames).labels(*labelvalues)
+
         #
         # Histograms of counts
         #
@@ -415,6 +460,19 @@ class PrometheusStatLogger(StatLoggerBase):
         if stats.prompt_tokens > 0:
             self.histogram_cache_hit_ratio_request.observe(stats.cached_tokens / stats.prompt_tokens)
         self.counter_cached_tokens_total.inc(stats.cached_tokens)
+
+        # triton 对齐的推理计数/延迟指标
+        latency_us: int = int(stats.e2e_latency * 1e6)  # 秒(s) → 微秒(us)
+        self.counter_inference_request_duration_us.inc(latency_us)
+        self.counter_inference_count.inc()
+        self.gauge_inference_request_duration_us.inc(latency_us)
+        self.gauge_inference_count.inc()
+        if (stats.finish_reason == ResponseType.FINISH) or (stats.finish_reason == ResponseType.SUCCESS):
+            self.counter_inference_request_success.inc()
+            self.gauge_inference_request_success.inc()
+        else:
+            self.counter_inference_request_failure.inc()
+            self.gauge_inference_request_failure.inc()
 
     @staticmethod
     def _get_counter_value(counter) -> float:
