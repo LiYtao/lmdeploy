@@ -13,12 +13,12 @@ jobs:
   linux-build:
     strategy:
       matrix:
-        pyver: [py310, py311, py312, py313, py314]
+        pyver: [py310, py311, py312, py313]
     runs-on: ubuntu-latest
     env:
       PYTHON_VERSION: ${{ matrix.pyver }}
-      PLAT_NAME: manylinux_2_28_x86_64
-      DOCKER_TAG: manylinux_2_28-cuda11.8
+      PLAT_NAME: manylinux2014_x86_64
+      DOCKER_TAG: cuda11.8
       OUTPUT_FOLDER: cuda11.8_dist
       CUDA_VER: 11.8
     steps:
@@ -62,7 +62,7 @@ jobs:
   windows-build:
     strategy:
       matrix:
-        pyver: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        pyver: ['3.10', '3.11', '3.12', '3.13']
     runs-on: windows-2022
     steps:
       - name: Set git for windows
