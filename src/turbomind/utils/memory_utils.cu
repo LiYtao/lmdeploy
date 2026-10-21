@@ -71,7 +71,12 @@ template<typename To, typename Ti>
 __global__ void dtype_cast_kernel(To* dst, const Ti* src, size_t n)
 {
     for (size_t i = threadIdx.x + blockIdx.x * blockDim.x; i < n; i += blockDim.x * gridDim.x) {
-        dst[i] = static_cast<To>(src[i]);
+        // Route every cast through float. Under CUDA 11.8 a direct
+        // half_t <-> bfloat16_t static_cast is ambiguous ("more than one
+        // user-defined conversion applies"); both types convert to/from
+        // float unambiguously, and float is the common widening path anyway,
+        // so this is lossless and also compiles cleanly under CUDA 12.x.
+        dst[i] = static_cast<To>(static_cast<float>(src[i]));
     }
 }
 
