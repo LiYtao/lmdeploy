@@ -1,0 +1,62 @@
+name: manylinux2014-verify
+
+# Feasibility probe on the MIGRATED 0.16.0batch tree: can it build a
+# manylinux2014 (glibc 2.17) wheel for BOTH cuda11.8 and cuda12.8?
+# The pristine-v0.16.0 probe died at copy.cc (CUDA-12-only symbols); this
+# tree carries the ported #if CUDA_VERSION >= 12000 guards, so cuda11.8 is
+# now expected to compile. Triggers automatically when this branch is pushed.
+on:
+  push:
+    branches:
+      - '0.16.0batch-verify'
+  workflow_dispatch:
+
+jobs:
+  linux-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        # single python keeps it fast; probe both CUDA builder images
+        cuda: [cuda11.8, cuda12.8]
+    runs-on: ubuntu-latest
+    env:
+      PYTHON_VERSION: py310
+      PLAT_NAME: manylinux2014_x86_64
+      DOCKER_TAG: ${{ matrix.cuda }}
+      OUTPUT_FOLDER: ${{ matrix.cuda }}_dist
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
+        with:
+          tool-cache: false
+          docker-images: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: false
+      - name: Add swap for CUDA compilation
+        run: |
+          sudo fallocate -l 32G /swapfile-lmdeploy-build
+          sudo chmod 600 /swapfile-lmdeploy-build
+          sudo mkswap /swapfile-lmdeploy-build
+          sudo swapon /swapfile-lmdeploy-build
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Build
+        run: |
+          echo ${PYTHON_VERSION} ${PLAT_NAME} ${DOCKER_TAG} ${OUTPUT_FOLDER}
+          # remove -it (no TTY in CI)
+          sed -i 's/docker run --rm -it/docker run --rm/g' builder/manywheel/build_wheel.sh
+          bash builder/manywheel/build_wheel.sh ${PYTHON_VERSION} ${PLAT_NAME} ${DOCKER_TAG} ${OUTPUT_FOLDER}
+      - name: Inspect wheel platform tag
+        run: |
+          echo "=== produced wheels (expect manylinux2014 in the name) ==="
+          ls -lh builder/manywheel/${OUTPUT_FOLDER}/
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          if-no-files-found: error
+          path: builder/manywheel/${{ env.OUTPUT_FOLDER }}/*
+          retention-days: 3
+          name: ${{ matrix.cuda }}-manylinux2014-py310
