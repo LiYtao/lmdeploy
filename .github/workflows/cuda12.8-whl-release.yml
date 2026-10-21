@@ -1,4 +1,4 @@
-name: cuda11.8-whl-release
+name: cuda12.8-whl-release
 
 on:
   push:
@@ -13,14 +13,14 @@ jobs:
   linux-build:
     strategy:
       matrix:
-        pyver: [py310, py311, py312, py313, py314]
+        pyver: [py310, py311, py312, py313]
     runs-on: ubuntu-latest
     env:
       PYTHON_VERSION: ${{ matrix.pyver }}
-      PLAT_NAME: manylinux_2_28_x86_64
-      DOCKER_TAG: manylinux_2_28-cuda11.8
-      OUTPUT_FOLDER: cuda11.8_dist
-      CUDA_VER: 11.8
+      PLAT_NAME: manylinux2014_x86_64
+      DOCKER_TAG: cuda12.8
+      OUTPUT_FOLDER: cuda12.8_dist
+      CUDA_VER: 12.8
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
@@ -82,11 +82,11 @@ jobs:
         shell: pwsh
         run: ./builder/windows/setup_cuda.ps1
         env:
-            INPUT_CUDA_VERSION: '11.8.0'
+            INPUT_CUDA_VERSION: '12.8.1'
       - name: Build wheel
         run: |
           python -m build --wheel -o build/wheel
-          Get-ChildItem -Path "build" -Filter "*.whl" | ForEach-Object { change_wheel_version $_.FullName --local-version cu118 --delete-old-wheel }
+          Get-ChildItem -Path "build" -Filter "*.whl" | ForEach-Object { change_wheel_version $_.FullName --local-version cu128 --delete-old-wheel }
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -112,7 +112,7 @@ jobs:
       - name: Add cuda version to package name
         run: |
           ver=$(cat lmdeploy/version.py | grep '__version__ =' | cut -d\' -f2)
-          cuver=$ver+cu118
+          cuver=$ver+cu128
           ls -lh
           cd artifact
           for file in *; do
